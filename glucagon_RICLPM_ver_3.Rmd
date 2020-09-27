@@ -1,0 +1,582 @@
+
+```{r}
+library(lavaan)
+library(openxlsx)
+library(semPlot)
+#library(GGally)
+library(tidyverse)
+
+glucagon<- read.csv('glucagon5_export_Fons.csv')
+
+#logtransform and normalize data
+dat.glucagon<-log(glucagon[,9:27])
+dat.glucagon<-scale(dat.glucagon)
+hist(dat.glucagon)
+n.glucagon <-cbind(glucagon[,1:8],dat.glucagon)
+
+
+# AUC calculations
+meancalc <- function(df, ...) {
+       require(zoo)
+       aucvars <- quos(...)
+          tabu <- df %>% ungroup() %>% select(!!!aucvars) %>% 
+                  mutate(myid = row_number()) %>% 
+                  gather(var,val,-myid) %>% 
+                  mutate(time = as.numeric(str_extract(var,"[0-9]+"))) %>%
+                  group_by(myid) %>% 
+                  filter(!is.na(val)|time%in%c(0,120)) %>% 
+                  arrange(time) %>% 
+                  summarise(AUC = mean(val,na.rm=T))
+          return(tabu$AUC)
+}
+
+
+glucagon <- glucagon %>% 
+            mutate(mean_glucose = meancalc(.,BZ0:BZ5),
+                   mean_insulin = meancalc(.,INS0:INS5),
+                   Matsuda_ISI = 10000/sqrt(BZ0*INS0*mean_glucose*mean_insulin)) %>% 
+            mutate_at(vars(Matsuda_ISI,GLUK0:BZ5),list(log = ~as.numeric(scale(log(.)))))
+
+#Show distribution of several variables in df
+showdist <- function(df,variables) {
+  temp <- df %>% gather(var,val,one_of(variables))
+  plot <- ggplot(temp, aes(x = val)) + geom_histogram() + facet_grid(~var, scales = "free")
+  return(plot)
+}
+
+showdist(glucagon,"Matsuda_ISI_log")
+
+```
+```{r}
+#RICLPM model unconstrained
+#INS ~ INS + BZ + GLUK + FFAMI
+#GLUK ~ INS + BZ + GLUK + FFAMI
+model9 <-'
+#LATENT VARIABLE DEFINITION
+LBZ0 =~ 1*BZ0_log 
+LBZ2 =~ 1*BZ2_log 
+LBZ3 =~ 1*BZ3_log
+LBZ4 =~ 1*BZ4_log
+LBZ5 =~ 1*BZ5_log 
+
+LGLUK0 =~ 1*GLUK0_log
+LGLUK2 =~ 1*GLUK2_log
+LGLUK3 =~ 1*GLUK3_log
+LGLUK4 =~ 1*GLUK4_log
+LGLUK5 =~ 1*GLUK5_log
+
+LINS0 =~ 1*INS0_log
+LINS2 =~ 1*INS2_log
+LINS3 =~ 1*INS3_log
+LINS4 =~ 1*INS4_log
+LINS5 =~ 1*INS5_log
+
+#Latent mean Structure with intercepts
+kappa =~ 1*BZ0_log + 1*BZ2_log + 1*BZ3_log + 1*BZ4_log + 1*BZ5_log
+omega =~ 1*INS0_log + 1*INS2_log + 1*INS3_log + 1*INS4_log + 1*INS5_log
+lambda =~ 1*GLUK0_log + 1*GLUK2_log + 1*GLUK3_log + 1*GLUK4_log + 1*GLUK5_log 
+
+#intercepts
+#mu: group mean per wave covariants 
+BZ0_log ~ mu1*1
+BZ2_log ~ mu2*1
+BZ3_log ~ mu3*1
+BZ4_log ~ mu4*1
+BZ5_log ~ mu5*1
+
+#pi: group mean per wave insulin
+INS0_log ~ pi1*1
+INS2_log ~ pi2*1
+INS3_log ~ pi3*1
+INS4_log ~ pi4*1
+INS5_log ~ pi5*1
+
+#zeta: group mean per wave glucagon
+GLUK0_log ~ zeta1*1
+GLUK2_log ~ zeta2*1
+GLUK3_log ~ zeta3*1
+GLUK4_log ~ zeta4*1
+GLUK5_log ~ zeta5*1
+
+#kappa: random intercepts for covariants
+#omega: random intercepts for Inuslin
+#kappa ~~ kappa #variance
+#omega ~~ omega #variance
+#lambda ~~ lambda
+#kappa ~~ omega #covariance
+#kappa ~~ lambda
+#omega ~~ lambda
+
+#LATENT FACTORS COVARIANCES @0	
+LBZ2 ~~ 0*LBZ0
+LBZ3 ~~ 0*LBZ0
+LBZ4 ~~ 0*LBZ0
+LBZ5 ~~ 0*LBZ0
+
+LINS2 ~~ 0*LINS0
+LINS3 ~~ 0*LINS0
+LINS4 ~~ 0*LINS0
+LINS5 ~~ 0*LINS0
+
+
+LGLUK2 ~~ 0*LGLUK0
+LGLUK3 ~~ 0*LGLUK0
+LGLUK4 ~~ 0*LGLUK0
+LGLUK5 ~~ 0*LGLUK0
+
+#LAGGED EFFECTS	
+#effects to be the same across both lags.
+LGLUK5 ~ alpha5*LGLUK4 + beta5*LINS4 + gamma5*LBZ4
+LGLUK4 ~ alpha4*LGLUK3 + beta4*LINS3 + gamma4*LBZ3
+LGLUK3 ~ alpha3*LGLUK2 + beta3*LINS2 + gamma3*LBZ2
+LGLUK2 ~ alpha2*LGLUK0 + beta2*LINS0 + gamma2*LBZ0
+#LGLUK0 ~ aa*Matsuda_ISI_log + dd*LFF0
+
+#variance
+LINS0 ~~ LINS0
+LINS2 ~~ u2*LINS2
+LINS3 ~~ u3*LINS3
+LINS4 ~~ u4*LINS4
+LINS5 ~~ u5*LINS5
+#variance
+LBZ0 ~~ LBZ0
+LBZ2 ~~ v2*LBZ2
+LBZ3 ~~ v3*LBZ3
+LBZ4 ~~ v4*LBZ4
+LBZ5 ~~ v5*LBZ5
+#variance
+LGLUK0 ~~ LGLUK0
+LGLUK2 ~~ w2*LGLUK2
+LGLUK3 ~~ w3*LGLUK3
+LGLUK4 ~~ w4*LGLUK4
+LGLUK5 ~~ w5*LGLUK5
+
+# CORRELATIONS	
+LGLUK0 ~~ a0*LBZ0	
+LGLUK2 ~~ a2*LBZ2
+LGLUK3 ~~ a3*LBZ3
+LGLUK4 ~~ a4*LBZ4
+LGLUK5 ~~ a5*LBZ5
+
+LGLUK0 ~~ b0*LINS0	
+LGLUK2 ~~ b2*LINS2
+LGLUK3 ~~ b3*LINS3
+LGLUK4 ~~ b4*LINS4
+LGLUK5 ~~ b5*LINS5
+'
+fit9 <- lavaan(model9, data=glucagon,missing='ml',
+               int.ov.free = F,
+               int.lv.free = F,
+               auto.fix.first = F,
+               auto.fix.single = F,
+               auto.cov.lv.x = F,
+               auto.cov.y = F,
+               auto.var = F)
+lavMatrix <-lavInspect(fit9, "cov.lv")
+myImagePlot(lavMatrix)
+summary(fit9,standardized = T)
+Estimates<-parameterEstimates(fit9,standardized=T)
+print(Estimates[nchar(Estimates[,"label"])==2,"std.all"])
+print(Estimates[nchar(Estimates[,"label"])==2,"pvalue"])
+coef(fit9)
+```
+
+```{r}
+#RICLPM model unconstrained
+#INS ~ INS + BZ + GLUK + FFAMI
+#GLUK ~ INS + BZ + GLUK + FFAMI
+model10 <-'
+#LATENT VARIABLE DEFINITION
+LBZ0 =~ 1*BZ0_log 
+LBZ2 =~ 1*BZ2_log 
+LBZ3 =~ 1*BZ3_log
+LBZ4 =~ 1*BZ4_log
+LBZ5 =~ 1*BZ5_log 
+
+LGLUK0 =~ 1*GLUK0_log
+LGLUK2 =~ 1*GLUK2_log
+LGLUK3 =~ 1*GLUK3_log
+LGLUK4 =~ 1*GLUK4_log
+LGLUK5 =~ 1*GLUK5_log
+
+LINS0 =~ 1*INS0_log
+LINS2 =~ 1*INS2_log
+LINS3 =~ 1*INS3_log
+LINS4 =~ 1*INS4_log
+LINS5 =~ 1*INS5_log
+
+#Latent mean Structure with intercepts
+kappa =~ 1*BZ0_log + 1*BZ2_log + 1*BZ3_log + 1*BZ4_log + 1*BZ5_log
+omega =~ 1*INS0_log + 1*INS2_log + 1*INS3_log + 1*INS4_log + 1*INS5_log
+lambda =~ 1*GLUK0_log + 1*GLUK2_log + 1*GLUK3_log + 1*GLUK4_log + 1*GLUK5_log 
+
+#intercepts
+#mu: group mean per wave covariants 
+BZ0_log ~ mu1*1
+BZ2_log ~ mu2*1
+BZ3_log ~ mu3*1
+BZ4_log ~ mu4*1
+BZ5_log ~ mu5*1
+
+#pi: group mean per wave insulin
+INS0_log ~ pi1*1
+INS2_log ~ pi2*1
+INS3_log ~ pi3*1
+INS4_log ~ pi4*1
+INS5_log ~ pi5*1
+
+#zeta: group mean per wave glucagon
+GLUK0_log ~ zeta1*1
+GLUK2_log ~ zeta2*1
+GLUK3_log ~ zeta3*1
+GLUK4_log ~ zeta4*1
+GLUK5_log ~ zeta5*1
+
+#kappa: random intercepts for covariants
+#omega: random intercepts for Inuslin
+kappa ~~ kappa #variance
+omega ~~ omega #variance
+lambda ~~ lambda
+kappa ~~ omega #covariance
+kappa ~~ lambda
+omega ~~ lambda
+
+#LATENT FACTORS COVARIANCES @0	
+LBZ2 ~~ 0*LBZ0
+LBZ3 ~~ 0*LBZ0
+LBZ4 ~~ 0*LBZ0
+LBZ5 ~~ 0*LBZ0
+
+LINS2 ~~ 0*LINS0
+LINS3 ~~ 0*LINS0
+LINS4 ~~ 0*LINS0
+LINS5 ~~ 0*LINS0
+
+LGLUK2 ~~ 0*LGLUK0
+LGLUK3 ~~ 0*LGLUK0
+LGLUK4 ~~ 0*LGLUK0
+LGLUK5 ~~ 0*LGLUK0
+
+#LAGGED EFFECTS	
+#effects to be the same across both lags.
+LINS5 ~ alpha5*LGLUK4 + beta5*LINS4 + gamma5*LBZ4
+LINS4 ~ alpha4*LGLUK3 + beta4*LINS3 + gamma4*LBZ3
+LINS3 ~ alpha3*LGLUK2 + beta3*LINS2 + gamma3*LBZ2
+LINS2 ~ alpha2*LGLUK0 + beta2*LINS0 + gamma2*LBZ0
+
+#LGLUK0 ~ aa*Matsuda_ISI_log + dd*LFF0
+
+#variance
+LINS0 ~~ LINS0
+LINS2 ~~ u2*LINS2
+LINS3 ~~ u3*LINS3
+LINS4 ~~ u4*LINS4
+LINS5 ~~ u5*LINS5
+#variance
+LBZ0 ~~ LBZ0
+LBZ2 ~~ v2*LBZ2
+LBZ3 ~~ v3*LBZ3
+LBZ4 ~~ v4*LBZ4
+LBZ5 ~~ v5*LBZ5
+#variance
+LGLUK0 ~~ LGLUK0
+LGLUK2 ~~ w2*LGLUK2
+LGLUK3 ~~ w3*LGLUK3
+LGLUK4 ~~ w4*LGLUK4
+LGLUK5 ~~ w5*LGLUK5
+
+# CORRELATIONS	
+LGLUK0 ~~ a0*LBZ0	
+LGLUK2 ~~ a2*LBZ2
+LGLUK3 ~~ a3*LBZ3
+LGLUK4 ~~ a4*LBZ4
+LGLUK5 ~~ a5*LBZ5
+
+LGLUK0 ~~ b0*LINS0	
+LGLUK2 ~~ b2*LINS2
+LGLUK3 ~~ b3*LINS3
+LGLUK4 ~~ b4*LINS4
+LGLUK5 ~~ b5*LINS5
+'
+fit10 <- lavaan(model10, data=glucagon,missing='ml',
+               int.ov.free = F,
+               int.lv.free = F,
+               auto.fix.first = F,
+               auto.fix.single = F,
+               auto.cov.lv.x = F,
+               auto.cov.y = F,
+               auto.var = F)
+lavMatrix <-lavInspect(fit10, "cov.lv")
+summary(fit10,standardized = T)
+Estimates<-parameterEstimates(fit10,standardized=T)
+print(Estimates[nchar(Estimates[,"label"])==2,"std.all"])
+print(Estimates[nchar(Estimates[,"label"])==2,"pvalue"])
+coef(fit10)
+```
+
+```{r}
+#RICLPM model unconstrained
+#INS ~ INS + BZ + GLUK + FFAMI
+#GLUK ~ INS + BZ + GLUK + FFAMI
+model11 <-'
+#LATENT VARIABLE DEFINITION
+LBZ0 =~ 1*BZ0_log 
+LBZ2 =~ 1*BZ2_log 
+LBZ3 =~ 1*BZ3_log
+LBZ4 =~ 1*BZ4_log
+LBZ5 =~ 1*BZ5_log 
+
+LGLUK0 =~ 1*GLUK0_log
+LGLUK2 =~ 1*GLUK2_log
+LGLUK3 =~ 1*GLUK3_log
+LGLUK4 =~ 1*GLUK4_log
+LGLUK5 =~ 1*GLUK5_log
+
+LINS0 =~ 1*INS0_log
+LINS2 =~ 1*INS2_log
+LINS3 =~ 1*INS3_log
+LINS4 =~ 1*INS4_log
+LINS5 =~ 1*INS5_log
+
+#Latent mean Structure with intercepts
+kappa =~ 1*BZ0_log + 1*BZ2_log + 1*BZ3_log + 1*BZ4_log + 1*BZ5_log
+omega =~ 1*INS0_log + 1*INS2_log + 1*INS3_log + 1*INS4_log + 1*INS5_log
+lambda =~ 1*GLUK0_log + 1*GLUK2_log + 1*GLUK3_log + 1*GLUK4_log + 1*GLUK5_log 
+
+#intercepts
+#mu: group mean per wave covariants 
+BZ0_log ~ mu1*1
+BZ2_log ~ mu2*1
+BZ3_log ~ mu3*1
+BZ4_log ~ mu4*1
+BZ5_log ~ mu5*1
+
+#pi: group mean per wave insulin
+INS0_log ~ pi1*1
+INS2_log ~ pi2*1
+INS3_log ~ pi3*1
+INS4_log ~ pi4*1
+INS5_log ~ pi5*1
+
+#zeta: group mean per wave glucagon
+GLUK0_log ~ zeta1*1
+GLUK2_log ~ zeta2*1
+GLUK3_log ~ zeta3*1
+GLUK4_log ~ zeta4*1
+GLUK5_log ~ zeta5*1
+
+#kappa: random intercepts for covariants
+#omega: random intercepts for Inuslin
+kappa ~~ kappa #variance
+omega ~~ omega #variance
+lambda ~~ lambda
+kappa ~~ omega #covariance
+kappa ~~ lambda
+omega ~~ lambda
+
+#LATENT FACTORS COVARIANCES @0	
+LBZ2 ~~ 0*LBZ0
+LBZ3 ~~ 0*LBZ0
+LBZ4 ~~ 0*LBZ0
+LBZ5 ~~ 0*LBZ0
+
+LINS2 ~~ 0*LINS0
+LINS3 ~~ 0*LINS0
+LINS4 ~~ 0*LINS0
+LINS5 ~~ 0*LINS0
+
+LGLUK2 ~~ 0*LGLUK0
+LGLUK3 ~~ 0*LGLUK0
+LGLUK4 ~~ 0*LGLUK0
+LGLUK5 ~~ 0*LGLUK0
+
+#LAGGED EFFECTS	
+#effects to be the same across both lags.
+LBZ5 ~ alpha5*LGLUK4 + beta5*LINS4 + gamma5*LBZ4
+LBZ4 ~ alpha4*LGLUK3 + beta4*LINS3 + gamma4*LBZ3
+LBZ3 ~ alpha3*LGLUK2 + beta3*LINS2 + gamma3*LBZ2
+LBZ2 ~ alpha2*LGLUK0 + beta2*LINS0 + gamma2*LBZ0
+
+#LGLUK0 ~ aa*Matsuda_ISI_log + dd*LFF0
+
+#variance
+LINS0 ~~ LINS0
+LINS2 ~~ u2*LINS2
+LINS3 ~~ u3*LINS3
+LINS4 ~~ u4*LINS4
+LINS5 ~~ u5*LINS5
+#variance
+LBZ0 ~~ LBZ0
+LBZ2 ~~ v2*LBZ2
+LBZ3 ~~ v3*LBZ3
+LBZ4 ~~ v4*LBZ4
+LBZ5 ~~ v5*LBZ5
+#variance
+LGLUK0 ~~ LGLUK0
+LGLUK2 ~~ w2*LGLUK2
+LGLUK3 ~~ w3*LGLUK3
+LGLUK4 ~~ w4*LGLUK4
+LGLUK5 ~~ w5*LGLUK5
+
+# CORRELATIONS	
+LGLUK0 ~~ a0*LBZ0	
+LGLUK2 ~~ a2*LBZ2
+LGLUK3 ~~ a3*LBZ3
+LGLUK4 ~~ a4*LBZ4
+LGLUK5 ~~ a5*LBZ5
+
+LGLUK0 ~~ b0*LINS0	
+LGLUK2 ~~ b2*LINS2
+LGLUK3 ~~ b3*LINS3
+LGLUK4 ~~ b4*LINS4
+LGLUK5 ~~ b5*LINS5
+'
+fit11 <- lavaan(model11, data=glucagon,missing='ml',
+               int.ov.free = F,
+               int.lv.free = F,
+               auto.fix.first = F,
+               auto.fix.single = F,
+               auto.cov.lv.x = F,
+               auto.cov.y = F,
+               auto.var = F)
+lavMatrix <-lavInspect(fit11, "cov.lv")
+summary(fit11,standardized = T)
+Estimates<-parameterEstimates(fit11,standardized=T)
+print(Estimates[nchar(Estimates[,"label"])==2,"std.all"])
+print(Estimates[nchar(Estimates[,"label"])==2,"pvalue"])
+coef(fit11)
+```
+
+
+```{r}
+#RICLPM model unconstrained
+#INS ~ INS + BZ + GLUK + FFAMI
+#GLUK ~ INS + BZ + GLUK + FFAMI
+model12 <-'
+#LATENT VARIABLE DEFINITION
+LBZ0 =~ 1*BZ0_log 
+LBZ2 =~ 1*BZ2_log 
+LBZ3 =~ 1*BZ3_log
+LBZ4 =~ 1*BZ4_log
+LBZ5 =~ 1*BZ5_log 
+
+LGLUK0 =~ 1*GLUK0_log
+LGLUK2 =~ 1*GLUK2_log
+LGLUK3 =~ 1*GLUK3_log
+LGLUK4 =~ 1*GLUK4_log
+LGLUK5 =~ 1*GLUK5_log
+
+LINS0 =~ 1*INS0_log
+LINS2 =~ 1*INS2_log
+LINS3 =~ 1*INS3_log
+LINS4 =~ 1*INS4_log
+LINS5 =~ 1*INS5_log
+
+#Latent mean Structure with intercepts
+kappa =~ 1*BZ0_log + 1*BZ2_log + 1*BZ3_log + 1*BZ4_log + 1*BZ5_log
+omega =~ 1*INS0_log + 1*INS2_log + 1*INS3_log + 1*INS4_log + 1*INS5_log
+lambda =~ 1*GLUK0_log + 1*GLUK2_log + 1*GLUK3_log + 1*GLUK4_log + 1*GLUK5_log 
+
+#intercepts
+#mu: group mean per wave covariants 
+BZ0_log ~ mu1*1
+BZ2_log ~ mu2*1
+BZ3_log ~ mu3*1
+BZ4_log ~ mu4*1
+BZ5_log ~ mu5*1
+
+#pi: group mean per wave insulin
+INS0_log ~ pi1*1
+INS2_log ~ pi2*1
+INS3_log ~ pi3*1
+INS4_log ~ pi4*1
+INS5_log ~ pi5*1
+
+#zeta: group mean per wave glucagon
+GLUK0_log ~ zeta1*1
+GLUK2_log ~ zeta2*1
+GLUK3_log ~ zeta3*1
+GLUK4_log ~ zeta4*1
+GLUK5_log ~ zeta5*1
+
+#kappa: random intercepts for covariants
+#omega: random intercepts for Inuslin
+kappa ~~ kappa #variance
+omega ~~ omega #variance
+lambda ~~ lambda
+kappa ~~ omega #covariance
+kappa ~~ lambda
+omega ~~ lambda
+
+#LATENT FACTORS COVARIANCES @0	
+LBZ2 ~~ 0*LBZ0
+LBZ3 ~~ 0*LBZ0
+LBZ4 ~~ 0*LBZ0
+LBZ5 ~~ 0*LBZ0
+
+LINS2 ~~ 0*LINS0
+LINS3 ~~ 0*LINS0
+LINS4 ~~ 0*LINS0
+LINS5 ~~ 0*LINS0
+
+LGLUK2 ~~ 0*LGLUK0
+LGLUK3 ~~ 0*LGLUK0
+LGLUK4 ~~ 0*LGLUK0
+LGLUK5 ~~ 0*LGLUK0
+
+#LAGGED EFFECTS	
+#effects to be the same across both lags.
+LGLUK5 ~ alpha5*LGLUK4 + beta5*LINS4 + gamma5*LBZ4
+LGLUK4 ~ alpha4*LGLUK3 + beta4*LINS3 + gamma4*LBZ3
+LGLUK3 ~ alpha3*LGLUK2 + beta3*LINS2 + gamma3*LBZ2
+LGLUK2 ~ alpha2*LGLUK0 + beta2*LINS0 + gamma2*LBZ0
+
+#LGLUK0 ~ aa*Matsuda_ISI_log + dd*LFF0
+
+#variance
+LINS0 ~~ LINS0
+LINS2 ~~ u2*LINS2
+LINS3 ~~ u3*LINS3
+LINS4 ~~ u4*LINS4
+LINS5 ~~ u5*LINS5
+#variance
+LBZ0 ~~ LBZ0
+LBZ2 ~~ v2*LBZ2
+LBZ3 ~~ v3*LBZ3
+LBZ4 ~~ v4*LBZ4
+LBZ5 ~~ v5*LBZ5
+#variance
+LGLUK0 ~~ LGLUK0
+LGLUK2 ~~ w2*LGLUK2
+LGLUK3 ~~ w3*LGLUK3
+LGLUK4 ~~ w4*LGLUK4
+LGLUK5 ~~ w5*LGLUK5
+
+# CORRELATIONS	
+LGLUK0 ~~ a0*LBZ0	
+LGLUK2 ~~ a2*LBZ2
+LGLUK3 ~~ a3*LBZ3
+LGLUK4 ~~ a4*LBZ4
+LGLUK5 ~~ a5*LBZ5
+
+LGLUK0 ~~ b0*LINS0	
+LGLUK2 ~~ b2*LINS2
+LGLUK3 ~~ b3*LINS3
+LGLUK4 ~~ b4*LINS4
+LGLUK5 ~~ b5*LINS5
+'
+fit12 <- lavaan(model12, data=glucagon,missing='ml',
+               int.ov.free = F,
+               int.lv.free = F,
+               auto.fix.first = F,
+               auto.fix.single = F,
+               auto.cov.lv.x = F,
+               auto.cov.y = F,
+               auto.var = F)
+lavMatrix <-lavInspect(fit12, "cov.lv")
+summary(fit12,standardized = T)
+Estimates<-parameterEstimates(fit12,standardized=T)
+print(Estimates[nchar(Estimates[,"label"])==2,"std.all"])
+print(Estimates[nchar(Estimates[,"label"])==2,"pvalue"])
+coef(fit12)
+```
